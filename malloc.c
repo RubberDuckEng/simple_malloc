@@ -1,12 +1,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <assert.h>
 #include <sys/mman.h>
 
 //    void *mmap(void *addr, size_t length, int prot, int flags,
 //               int fd, off_t offset);
 
-void *page_alloc(size_t size)
+static void *page_alloc(size_t size)
 {
     if (size <= 0)
         return NULL;
@@ -20,22 +21,50 @@ void *page_alloc(size_t size)
 
 struct node
 {
-    struct node *next;
-    struct node *prev;
-    size_t size; // Does not include size of node.
+    struct node *next; // next node in memory order.
+    struct node *prev; // previous node in memory order.
+    size_t size;       // Does not include size of node.
     bool is_free;
 };
+
+struct body
+{
+    struct node *next_free; // Set if free, not in memory order.
+};
+
+static struct body *get_body(struct node *node)
+{
+    return (struct body *)((char *)node + sizeof(struct node));
+}
+
+static struct node *get_next_free(struct node *node)
+{
+    return get_body(node)->next_free;
+}
+
+static void set_next_free(struct node *node, struct node *next_free)
+{
+    get_body(node)->next_free = next_free;
+}
+
+static void insert_after(struct node *left, struct node *right)
+{
+    right->next = left->next;
+    right->prev = left;
+    left->prev = right;
+}
 
 static struct pool
 {
     void *start;
     size_t size;
     struct node *first;
+    struct node *first_free;
 } g_pool = {NULL, 0};
 
 void init_heap(void)
 {
-    const size_t pool_size = 10 * 1024 * 1024;
+    const size_t pool_size = ((size_t)10) * 1024 * 1024 * 1024; // 10 GB
     g_pool.start = page_alloc(pool_size);
     g_pool.size = pool_size;
     g_pool.first = (struct node *)g_pool.start;
@@ -43,6 +72,18 @@ void init_heap(void)
     g_pool.first->prev = NULL;
     g_pool.first->size = g_pool.size - sizeof(struct node);
     g_pool.first->is_free = true;
+    set_next_free(g_pool.first, NULL);
+    g_pool.first_free = g_pool.first;
+}
+
+struct node *node_from_ptr(void *ptr)
+{
+    return (struct node *)((char *)ptr - sizeof(struct node));
+}
+
+void *ptr_from_node(struct node *node_ptr)
+{
+    return (void *)((char *)node_ptr + sizeof(struct node));
 }
 
 // allocates a block of memory
@@ -52,25 +93,52 @@ my_malloc(size_t size)
 {
     if (size <= 0)
         return NULL;
-    struct node *current = g_pool.first;
+    struct node *prev_free = NULL;
+    struct node *current = g_pool.first_free;
     while (current != NULL)
     {
-        if (current->is_free && current->size >= size)
+        assert(current->is_free);
+        if (current->size >= size)
         {
-            if (current->size > size + sizeof(struct node))
+            // Free nodes must be large enough to fit both header and body.
+            // Otherwise it's left as fragmented space which will be
+            // reclaimed when the section before is freed.
+            const size_t kMinimumFreeNodeSize = sizeof(struct node) + sizeof(struct body);
+            if (current->size > size + kMinimumFreeNodeSize)
             {
                 // Split the node.
                 struct node *new_node = (struct node *)((char *)current + sizeof(struct node) + size);
-                new_node->next = current->next;
-
-                new_node->prev = current;
+                insert_after(current, new_node);
                 new_node->size = current->size - size - sizeof(struct node);
-                new_node->is_free = true;
-                current->next = new_node;
                 current->size = size;
+                new_node->is_free = true;
+
+                set_next_free(new_node, get_next_free(current));
+                if (prev_free != NULL)
+                {
+                    // Insert into the free list after prev_free.
+                    set_next_free(prev_free, new_node);
+                }
+                else
+                {
+                    // The first free node had enough space, make this first.
+                    g_pool.first_free = new_node;
+                }
+            }
+            else
+            {
+                struct node *next_free = get_next_free(current);
+                if (prev_free != NULL)
+                {
+                    set_next_free(prev_free, next_free);
+                }
+                else
+                {
+                    g_pool.first_free = next_free;
+                }
             }
             current->is_free = false;
-            return (void *)((char *)current + sizeof(struct node));
+            return ptr_from_node(current);
         }
         current = current->next;
     }
@@ -82,9 +150,11 @@ my_malloc(size_t size)
 // calling free twice is an error.
 void my_free(void *ptr)
 {
+    if (ptr == NULL)
+        return;
     // find where the free node would go in the free list?
     // make a new node for it?
-    struct node *node = (struct node *)((char *)ptr - sizeof(struct node));
+    struct node *node = node_from_ptr(ptr);
     node->is_free = true;
     if (node->prev && node->prev->is_free)
     {
@@ -97,16 +167,14 @@ void my_free(void *ptr)
         }
         node = prev;
     }
-    if (node->next && node->next->is_free)
+    else
     {
-        struct node *next = node->next;
-        node->size += next->size + sizeof(struct node);
-        node->next = next->next;
-        if (next->next)
-        {
-            next->next->prev = node;
-        }
+        set_next_free(node, g_pool.first_free);
+        g_pool.first_free = node;
     }
+    // TODO: We could merge with the next node if it's free, but we don't know
+    // how to maintain the free list in that case.  If we made the free list
+    // doubly linked, then we could do it.
 }
 
 void dump_heap(void)
@@ -124,24 +192,3 @@ void dump_heap(void)
 void *my_calloc(size_t number_of_members, size_t size);
 
 void *my_realloc(void *ptr, size_t size);
-
-int main(void)
-{
-    init_heap();
-    dump_heap();
-    void *ptr1 = my_malloc(100);
-    printf("malloc(100) -> %p\n", ptr1);
-    dump_heap();
-    void *ptr2 = my_malloc(100);
-    void *ptr3 = my_malloc(210);
-    void *ptr4 = my_malloc(816);
-    printf("More allocs\n");
-    dump_heap();
-    printf("free ptr2\n");
-    my_free(ptr2);
-    dump_heap();
-    printf("free ptr3\n");
-    my_free(ptr3);
-    dump_heap();
-    return 0;
-}
