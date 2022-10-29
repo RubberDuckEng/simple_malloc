@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <sys/sysinfo.h>
+#include <inttypes.h>
 
 #include "malloc.h"
 
@@ -11,6 +11,7 @@ int main(int argc, const char **argv)
     if (argc != 2)
     {
         printf("Usage: %s <size>\n", argv[0]);
+        return -1;
     }
     init_heap();
 
@@ -38,7 +39,7 @@ int main(int argc, const char **argv)
     int64_t t2 = monotime.tv_sec * 1000000000 + monotime.tv_nsec;
 
     int64_t delta = t2 - t1;
-    printf("time delta=%ldns\n", delta);
+    printf("time delta=%" PRId64 "ns\n", delta);
 
     return 0;
 }
