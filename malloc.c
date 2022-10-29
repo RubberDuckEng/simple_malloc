@@ -4,13 +4,14 @@
 #include <assert.h>
 #include <sys/mman.h>
 
-//    void *mmap(void *addr, size_t length, int prot, int flags,
-//               int fd, off_t offset);
+// page ------------------------------------------------------------------------
 
 static void *page_alloc(size_t size)
 {
     if (size <= 0)
+    {
         return NULL;
+    }
     void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED)
     {
@@ -18,6 +19,8 @@ static void *page_alloc(size_t size)
     }
     return ptr;
 }
+
+// node ------------------------------------------------------------------------
 
 struct node
 {
@@ -32,27 +35,39 @@ struct body
     struct node *next_free; // Set if free, not in memory order.
 };
 
-static struct body *get_body(struct node *node)
+static struct body *node_get_body(struct node *node)
 {
     return (struct body *)((char *)node + sizeof(struct node));
 }
 
-static struct node *get_next_free(struct node *node)
+static struct node *node_get_next_free(struct node *node)
 {
-    return get_body(node)->next_free;
+    return node_get_body(node)->next_free;
 }
 
-static void set_next_free(struct node *node, struct node *next_free)
+static void node_set_next_free(struct node *node, struct node *next_free)
 {
-    get_body(node)->next_free = next_free;
+    node_get_body(node)->next_free = next_free;
 }
 
-static void insert_after(struct node *left, struct node *right)
+static void node_insert_after(struct node *left, struct node *right)
 {
     right->next = left->next;
     right->prev = left;
     left->prev = right;
 }
+
+static struct node *node_from_ptr(void *ptr)
+{
+    return (struct node *)((char *)ptr - sizeof(struct node));
+}
+
+static void *node_get_ptr(struct node *node)
+{
+    return (void *)((char *)node + sizeof(struct node));
+}
+
+// pool ------------------------------------------------------------------------
 
 static struct pool
 {
@@ -72,19 +87,11 @@ void init_heap(void)
     g_pool.first->prev = NULL;
     g_pool.first->size = g_pool.size - sizeof(struct node);
     g_pool.first->is_free = true;
-    set_next_free(g_pool.first, NULL);
+    node_set_next_free(g_pool.first, NULL);
     g_pool.first_free = g_pool.first;
 }
 
-struct node *node_from_ptr(void *ptr)
-{
-    return (struct node *)((char *)ptr - sizeof(struct node));
-}
-
-void *ptr_from_node(struct node *node_ptr)
-{
-    return (void *)((char *)node_ptr + sizeof(struct node));
-}
+// allocator -------------------------------------------------------------------
 
 // allocates a block of memory
 // returns 0 on failure.
@@ -92,7 +99,9 @@ void *
 my_malloc(size_t size)
 {
     if (size <= 0)
+    {
         return NULL;
+    }
     struct node *prev_free = NULL;
     struct node *current = g_pool.first_free;
     while (current != NULL)
@@ -108,16 +117,16 @@ my_malloc(size_t size)
             {
                 // Split the node.
                 struct node *new_node = (struct node *)((char *)current + sizeof(struct node) + size);
-                insert_after(current, new_node);
+                node_insert_after(current, new_node);
                 new_node->size = current->size - size - sizeof(struct node);
                 current->size = size;
                 new_node->is_free = true;
 
-                set_next_free(new_node, get_next_free(current));
+                node_set_next_free(new_node, node_get_next_free(current));
                 if (prev_free != NULL)
                 {
                     // Insert into the free list after prev_free.
-                    set_next_free(prev_free, new_node);
+                    node_set_next_free(prev_free, new_node);
                 }
                 else
                 {
@@ -127,10 +136,10 @@ my_malloc(size_t size)
             }
             else
             {
-                struct node *next_free = get_next_free(current);
+                struct node *next_free = node_get_next_free(current);
                 if (prev_free != NULL)
                 {
-                    set_next_free(prev_free, next_free);
+                    node_set_next_free(prev_free, next_free);
                 }
                 else
                 {
@@ -138,7 +147,7 @@ my_malloc(size_t size)
                 }
             }
             current->is_free = false;
-            return ptr_from_node(current);
+            return node_get_ptr(current);
         }
         current = current->next;
     }
@@ -169,7 +178,7 @@ void my_free(void *ptr)
     }
     else
     {
-        set_next_free(node, g_pool.first_free);
+        node_set_next_free(node, g_pool.first_free);
         g_pool.first_free = node;
     }
     // TODO: We could merge with the next node if it's free, but we don't know
