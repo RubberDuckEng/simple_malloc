@@ -240,6 +240,7 @@ void dump_heap(void)
 void *calloc(size_t number_of_members, size_t size)
 {
     const size_t number_of_bytes = number_of_members * size;
+    my_log("calloc", number_of_bytes);
     void *ptr = malloc(number_of_bytes);
     // TODO: Rather than touching every page, we should instead realize that
     // the pages are already zeroed when we get them from the OS.
@@ -249,6 +250,7 @@ void *calloc(size_t number_of_members, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
+    my_log("realloc", size);
     // TODO: Check whether the node is large enough to fit the new size and just
     // update the metadata rather than always allocating a new node.
     void *new_ptr = malloc(size);
