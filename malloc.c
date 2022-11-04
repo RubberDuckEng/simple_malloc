@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <sys/mman.h>
+#include <string.h>
+#include <unistd.h>
 
 // page ------------------------------------------------------------------------
 
@@ -89,16 +91,31 @@ void init_heap(void)
     g_pool.first->is_free = true;
     node_set_next_free(g_pool.first, NULL);
     g_pool.first_free = g_pool.first;
+    write(STDERR_FILENO, "heap initialized\n", 17);
 }
 
 // allocator -------------------------------------------------------------------
 
+#define ALIGN8(n) (((n) + 8 - 1) & ~(8 - 1))
+
+static void my_log(const char *msg, size_t value)
+{
+    char buffer[1024];
+    snprintf(buffer, sizeof(buffer), "%s(%zu)\n", msg, value);
+    write(STDERR_FILENO, buffer, strlen(buffer));
+}
+
 // allocates a block of memory
 // returns 0 on failure.
 void *
-my_malloc(size_t size)
+malloc(size_t requested_size)
 {
-    if (size <= 0)
+    my_log("malloc", requested_size);
+    if (g_pool.start == NULL)
+    {
+        init_heap();
+    }
+    if (requested_size <= 0)
     {
         return NULL;
     }
@@ -107,19 +124,40 @@ my_malloc(size_t size)
     while (current != NULL)
     {
         assert(current->is_free);
-        if (current->size >= size)
+        if (current->size >= requested_size)
         {
             // Free nodes must be large enough to fit both header and body.
             // Otherwise it's left as fragmented space which will be
             // reclaimed when the section before is freed.
+
+            // Goal: Every "client region" is 8-byte aligned (i.e., starts at an
+            // 8 byte offset).
+            // Strategy: Always align nodes at 8-byte boundaries.
+            static_assert(sizeof(struct node) == ALIGN8(sizeof(struct node)), "node must a multiple of 8-bytes");
+
+            // Starting with:
+            // | node | free space |
+
+            // Question: If we allocated the client's request from the current
+            // node's free-space, would there be enough left over to create
+            // a new node in the free space?
+            // e.g. Do we want to create:
+            // | node | client region | free space for alignment | node | free space |
+            // Or do we just do:
+            // | node | client region | free space |
+
+            // Sum of "client region" and "free space for alignment"
+            const size_t aligned_size = ALIGN8(requested_size);
+            // Sum of "node" and the least "free space" we're interested in:
             const size_t kMinimumFreeNodeSize = sizeof(struct node) + sizeof(struct body);
-            if (current->size > size + kMinimumFreeNodeSize)
+
+            if (current->size > aligned_size + kMinimumFreeNodeSize)
             {
                 // Split the node.
-                struct node *new_node = (struct node *)((char *)current + sizeof(struct node) + size);
+                struct node *new_node = (struct node *)((char *)current + aligned_size);
                 node_insert_after(current, new_node);
-                new_node->size = current->size - size - sizeof(struct node);
-                current->size = size;
+                new_node->size = current->size - aligned_size - sizeof(struct node);
+                current->size = aligned_size;
                 new_node->is_free = true;
 
                 node_set_next_free(new_node, node_get_next_free(current));
@@ -157,13 +195,14 @@ my_malloc(size_t size)
 // Tells the system you're done with this block of memory.
 // 0 is not an error.
 // calling free twice is an error.
-void my_free(void *ptr)
+void free(void *ptr)
 {
     if (ptr == NULL)
         return;
     // find where the free node would go in the free list?
     // make a new node for it?
     struct node *node = node_from_ptr(ptr);
+    my_log("free", node->size);
     node->is_free = true;
     if (node->prev && node->prev->is_free)
     {
@@ -198,6 +237,22 @@ void dump_heap(void)
 }
 
 // clearing allocator, memory is always zeroed.
-void *my_calloc(size_t number_of_members, size_t size);
+void *calloc(size_t number_of_members, size_t size)
+{
+    const size_t number_of_bytes = number_of_members * size;
+    void *ptr = malloc(number_of_bytes);
+    // TODO: Rather than touching every page, we should instead realize that
+    // the pages are already zeroed when we get them from the OS.
+    memset(ptr, 0, number_of_bytes);
+    return ptr;
+}
 
-void *my_realloc(void *ptr, size_t size);
+void *realloc(void *ptr, size_t size)
+{
+    // TODO: Check whether the node is large enough to fit the new size and just
+    // update the metadata rather than always allocating a new node.
+    void *new_ptr = malloc(size);
+    memcpy(new_ptr, ptr, size);
+    free(ptr);
+    return new_ptr;
+}
