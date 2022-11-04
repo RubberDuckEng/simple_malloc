@@ -14,3 +14,4 @@ clang malloc.c && ./a.out
   - LD_PRELOAD
 * Tech to C++
 * Return memory to the OS
+* refactor free functions to be object oriented (e.g. node_set_next_free)
